@@ -1,7 +1,8 @@
 import os
 import asyncio
 import asyncpg
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -12,16 +13,10 @@ from agent import GenesisAgent
 
 load_dotenv()
 
-app = FastAPI(title="Genesis Tree", description="Universal Human Lineage Graph")
+# Render gives postgres:// but asyncpg needs postgresql://
+_raw_url = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/genesis")
+DATABASE_URL = _raw_url.replace("postgres://", "postgresql://", 1)
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://user:pass@localhost/genesis")
 _pool = None
 
 async def get_pool():
@@ -30,13 +25,26 @@ async def get_pool():
         _pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     return _pool
 
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app):
+    # Startup
     pool = await get_pool()
-    # Start the autonomous agent loop
     agent = GenesisAgent(pool)
     asyncio.create_task(agent.run_forever())
     print("✅ Genesis Agent started — growing forever")
+    yield
+    # Shutdown
+    if _pool:
+        await _pool.close()
+
+app = FastAPI(title="Ashvattha", description="Universal Human Lineage Graph", lifespan=lifespan)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # ─────────────────────────────────────────────
 # MODELS
@@ -304,8 +312,12 @@ async def get_activity(limit: int = 50):
 # ─────────────────────────────────────────────
 # SERVE FRONTEND
 # ─────────────────────────────────────────────
-app.mount("/static", StaticFiles(directory="../frontend"), name="static")
+# Resolve frontend path relative to this file's location
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+
+app.mount("/static", StaticFiles(directory=FRONTEND_DIR), name="static")
 
 @app.get("/")
 async def serve_frontend():
-    return FileResponse("../frontend/index.html")
+    return FileResponse(os.path.join(FRONTEND_DIR, "index.html"))
